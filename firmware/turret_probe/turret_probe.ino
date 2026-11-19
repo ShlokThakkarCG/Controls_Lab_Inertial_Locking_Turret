@@ -191,8 +191,11 @@ float servoActualDeg(const ServoState &s) {
 // ==================== RUNTIME CONFIG ====================
 bool     streaming     = true;
 uint32_t stream_period_ms = 20;     // 50 Hz
-uint32_t i2c_khz       = 50;
-uint16_t imu_period_ms = 20;        // 50 Hz IMU reports
+// imu_rate_test log: 400 kHz + 5 ms gives a full 200 Hz from both IMUs with a
+// ~7 ms worst-case loop (50 kHz + 20 ms: 50 Hz, ~16 ms loop). 2 ms reports only
+// reach ~120 Hz, and 1 MHz is worse, so these are the sweet spot.
+uint32_t i2c_khz       = 400;
+uint16_t imu_period_ms = 5;         // 200 Hz IMU reports
 Mat3     joint_offset  = IDENTITY;  // maps barrel-world into base-world (set at tare)
 bool     tared         = false;
 uint32_t seq           = 0;
