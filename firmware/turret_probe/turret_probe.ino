@@ -56,6 +56,7 @@ constexpr int SERVO_RX_PIN    = 11;
 constexpr int I2C_SDA_PIN     = 6;
 constexpr int I2C_SCL_PIN     = 7;
 constexpr int MARK_BUTTON_PIN = 9;     // onboard BOOT button
+constexpr int IMU_RESET_PIN   = 2;     // shared RST (active LOW) of both BNO08x boards
 
 constexpr uint32_t USB_BAUD = 921600;
 
@@ -193,6 +194,17 @@ uint32_t seq           = 0;
 uint32_t loop_max_us   = 0;
 
 // ==================== I2C / IMU SETUP ====================
+// Hardware-reset both BNO08x. An ESP32 reset in the middle of an I2C read can
+// leave a BNO08x clock-stretching forever (SDA and SCL both held at 0 V);
+// only pulling RST low (or a power cycle) releases it.
+void hardResetImus() {
+  pinMode(IMU_RESET_PIN, OUTPUT);
+  digitalWrite(IMU_RESET_PIN, LOW);
+  delay(20);
+  digitalWrite(IMU_RESET_PIN, HIGH);
+  delay(300);                        // BNO08x boot time before it answers on I2C
+}
+
 void recoverI2CBus() {
   pinMode(I2C_SDA_PIN, INPUT_PULLUP);
   pinMode(I2C_SCL_PIN, OUTPUT);
@@ -236,6 +248,34 @@ void beginImu(ImuState &s, uint8_t addr, const char *name) {
     Serial.printf("# %s IMU (0x%02X) attempt %d: %s\n", name, addr, attempt, s.ready ? "OK" : "FAIL");
   }
   enableImuReports(s);
+}
+
+// Full IMU bring-up: hardware reset, bus recovery, begin + enable reports.
+uint32_t imu_recoveries = 0;
+void initImus() {
+  hardResetImus();
+  recoverI2CBus();
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(i2c_khz * 1000);
+  Wire.setTimeOut(100);
+  beginImu(base_imu, BASE_IMU_ADDRESS, "Base");
+  delay(150);
+  beginImu(barrel_imu, BARREL_IMU_ADDRESS, "Barrel");
+  base_imu.last_ms = barrel_imu.last_ms = millis();   // restart the staleness clock
+}
+
+// Watchdog: if either IMU has been silent for IMU_STALE_MS, reset and re-init both.
+constexpr uint32_t IMU_STALE_MS = 500;
+void imuWatchdog(uint32_t now) {
+  static uint32_t last_attempt_ms = 0;
+  if (now - last_attempt_ms < 2000) return;
+  bool base_stale   = now - base_imu.last_ms   > IMU_STALE_MS;
+  bool barrel_stale = now - barrel_imu.last_ms > IMU_STALE_MS;
+  if (!base_stale && !barrel_stale) return;
+  last_attempt_ms = now;
+  imu_recoveries++;
+  Serial.printf("E,%lu,imu_recover,base_stale=%d,barrel_stale=%d\n", now, base_stale, barrel_stale);
+  initImus();
 }
 
 void pollImu(ImuState &s) {
@@ -328,9 +368,9 @@ void printHealth(uint32_t now, uint32_t window_ms) {
   float scale = 1000.0f / window_ms;
   uint32_t ok = az_servo.reads_ok + el_servo.reads_ok;
   uint32_t total = ok + az_servo.reads_fail + el_servo.reads_fail;
-  Serial.printf("S,%lu,base_hz=%.1f,brl_hz=%.1f,servo_ok=%lu/%lu,loop_max_us=%lu,i2c_khz=%lu,imu_ms=%u,imu_resets=%lu/%lu\n",
+  Serial.printf("S,%lu,base_hz=%.1f,brl_hz=%.1f,servo_ok=%lu/%lu,loop_max_us=%lu,i2c_khz=%lu,imu_ms=%u,imu_resets=%lu/%lu,recoveries=%lu\n",
                 now, base_imu.count * scale, barrel_imu.count * scale, ok, total,
-                loop_max_us, i2c_khz, imu_period_ms, base_imu.resets, barrel_imu.resets);
+                loop_max_us, i2c_khz, imu_period_ms, base_imu.resets, barrel_imu.resets, imu_recoveries);
   base_imu.count = barrel_imu.count = 0;
   az_servo.reads_ok = az_servo.reads_fail = el_servo.reads_ok = el_servo.reads_fail = 0;
   loop_max_us = 0;
@@ -417,15 +457,7 @@ void handleCommand(String line) {
     Wire.setClock(i2c_khz * 1000);
     Wire.setTimeOut(100);
   }
-  else if (line == "imuinit") {
-    recoverI2CBus();
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.setClock(i2c_khz * 1000);
-    scanI2C();
-    beginImu(base_imu, BASE_IMU_ADDRESS, "Base");
-    delay(150);
-    beginImu(barrel_imu, BARREL_IMU_ADDRESS, "Barrel");
-  }
+  else if (line == "imuinit") { initImus(); scanI2C(); }
   else if (line.startsWith("mark")) { Serial.printf("E,%lu,mark,%s\n", millis(), line.substring(4).c_str()); }
   else { Serial.printf("# unknown command '%s'\n", line.c_str()); printHelp(); }
 }
@@ -448,6 +480,7 @@ void pollSerial() {
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(USB_BAUD);
+  Serial.setTxTimeoutMs(0);   // never block the loop when no PC is reading the USB port
   delay(1500);
   Serial.println("\n# === turret_probe (Phase 0 diagnostics) ===");
   pinMode(MARK_BUTTON_PIN, INPUT_PULLUP);
@@ -463,15 +496,8 @@ void setup() {
   writeServoDeg(az_servo, 0);
   writeServoDeg(el_servo, 0);
 
-  recoverI2CBus();
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.setClock(i2c_khz * 1000);
-  Wire.setTimeOut(100);
-  delay(300);
+  initImus();
   scanI2C();
-  beginImu(base_imu, BASE_IMU_ADDRESS, "Base");
-  delay(150);
-  beginImu(barrel_imu, BARREL_IMU_ADDRESS, "Barrel");
 
   printInfo();
   printHelp();
@@ -495,6 +521,7 @@ void loop() {
 
   pollImu(base_imu);
   pollImu(barrel_imu);
+  imuWatchdog(millis());
 
   uint32_t now = millis();
   static uint32_t last_stream_ms = 0;
