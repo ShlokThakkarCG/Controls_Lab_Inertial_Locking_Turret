@@ -23,8 +23,11 @@ ap.add_argument("--axis", choices=["az", "el"], required=True)
 ap.add_argument("--start", type=int, required=True)
 ap.add_argument("--stop", type=int, required=True, help="furthest tick to try")
 ap.add_argument("--step", type=int, default=5)
-ap.add_argument("--max-load", type=float, default=350)
-ap.add_argument("--max-lag", type=float, default=12)
+# Normal free-moving load reads 0..90 and lag 0..6 ticks. The old 350 / 12
+# thresholds let the barrel push against base parts before stopping, so stop
+# at the first clear rise instead.
+ap.add_argument("--max-load", type=float, default=120)
+ap.add_argument("--max-lag", type=float, default=7)
 ap.add_argument("--settle", type=float, default=0.6)
 args = ap.parse_args()
 

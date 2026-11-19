@@ -84,7 +84,7 @@ constexpr int     ELEVATION_ZERO_TICK    = 898;      // barrel parallel to base 
 constexpr int     ELEVATION_DIR          = -1;       // +deg = up = ticks down
 constexpr float   ELEVATION_DEG_PER_TICK = 0.2228f;  // linear fit, residual rms 0.8 deg over -21..+60
 constexpr float   ELEVATION_MIN_DEG      = -20.0f;   // clean travel probed to -21 (tick 1005, servo end)
-constexpr float   ELEVATION_MAX_DEG      = +60.0f;   // load rises past ~+67 (tick ~555): barrel starts touching
+constexpr float   ELEVATION_MAX_DEG      = +55.0f;   // barrel tail hits base parts near the top (user saw it slam); +60 cut by 5 deg
 
 // ==================== MATH ====================
 constexpr float RAD2DEG = 57.29577951f;
