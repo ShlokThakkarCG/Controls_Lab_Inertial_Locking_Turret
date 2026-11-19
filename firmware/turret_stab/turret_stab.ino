@@ -79,7 +79,8 @@ constexpr float   ELEVATION_MAX_DEG      = +55.0f;
 
 // ==================== CONTROL PARAMETERS (runtime-tunable) ====================
 int   control_mode   = 3;
-float lead_ms        = 0.0f;     // base-motion prediction horizon
+float lead_ms        = 110.0f;   // base-motion prediction horizon; lead_test_v3: 0->2.61, 50->2.27,
+                                 // 80->1.70, 110->1.53 deg RMS (residual lag 55 -> 15 ms)
 float kp_fb          = 0.30f;    // feedback proportional gain [deg/deg]
 float ki_fb          = 2.0f;     // feedback integral gain [1/s]
 float fb_int_limit   = 10.0f;    // integrator clamp [deg] (FF does the big moves; FB only trims)
