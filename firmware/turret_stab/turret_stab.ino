@@ -33,6 +33,8 @@
  *   aim <daz> <del>   while locked: move the target by daz/del degrees (re-aim / sign test)
  *   lead <ms>         prediction horizon for mode 2/3 (default 0 = off until tuned)
  *   kp <v> / ki <v>   feedback gains (deg per deg, 1/s)
+ *   slew <dps>        max command speed while locked (default 400)
+ *   accel <dps2>      max command acceleration while locked (default 4000)
  *   az <d> / el <d> / go <az> <el> / c   manual moves (unlocks first)
  *   on / off          servo torque
  *   spd <n>           manual move speed (0 = max)     sspd <n>  stabilizer servo speed (0 = max)
@@ -80,11 +82,16 @@ int   control_mode   = 3;
 float lead_ms        = 0.0f;     // base-motion prediction horizon
 float kp_fb          = 0.30f;    // feedback proportional gain [deg/deg]
 float ki_fb          = 2.0f;     // feedback integral gain [1/s]
-float fb_int_limit   = 20.0f;    // integrator clamp [deg]
+float fb_int_limit   = 10.0f;    // integrator clamp [deg] (FF does the big moves; FB only trims)
+float slew_dps       = 400.0f;   // max command speed [deg/s] (servo peak is ~300-360)
+float accel_dps2     = 4000.0f;  // max command acceleration [deg/s^2]
+float az_vel = 0, el_vel = 0;    // current command speeds used by the limiter
+constexpr float LEAD_MAX_DEG       = 25.0f;   // cap on the predicted base rotation
+constexpr float FB_FREEZE_ERR_DEG  = 15.0f;   // stop integrating above this pointing error
 float rate_tau_s     = 0.015f;   // low-pass on the differentiated base rate
 uint16_t manual_speed = 1200;    // gentle manual moves
 uint16_t stab_speed   = 0;       // 0 = servo maximum speed while stabilizing
-constexpr uint32_t IMU_STALE_LOCK_MS = 100;   // freeze command if base IMU older than this
+constexpr uint32_t IMU_STALE_LOCK_MS = 40;    // freeze command if an IMU sample is older than this
 
 // ==================== MATH ====================
 constexpr float RAD2DEG = 57.29577951f;
@@ -227,11 +234,40 @@ void readServo(ServoState &s) {
   if (servo_bus.FeedBack(s.id) != -1) {
     s.meas_tick = servo_bus.ReadPos(-1);
     s.meas_load = servo_bus.ReadLoad(-1);
+    s.volt_dv   = servo_bus.ReadVoltage(-1);   // 0.1 V units
+    s.temp_c    = servo_bus.ReadTemper(-1);
+    if (s.volt_dv > 0 && s.volt_dv < s.volt_min_dv) s.volt_min_dv = s.volt_dv;
     s.reads_ok++;
+    s.fail_streak = 0;
   } else {
     s.meas_tick = -1;
     s.reads_fail++;
+    s.fail_streak++;
   }
+}
+
+// Servo feedback is only for logging, so it must never stall the control loop.
+// When the servos stop answering (seen after hard slams: supply/bus drop-out),
+// each failed read costs a timeout; back off to a slow retry, flag it, and
+// unlock so the feedback integrator cannot wind up against a dead barrel.
+bool servo_comm_lost = false;
+void readServosSafely(uint32_t now) {
+  static uint32_t last_retry_ms = 0;
+  bool failing = az_servo.fail_streak >= 5 && el_servo.fail_streak >= 5;
+  if (failing && now - last_retry_ms < 250) return;
+  last_retry_ms = now;
+  readServo(az_servo);
+  readServo(el_servo);
+  bool lost = az_servo.fail_streak >= 5 && el_servo.fail_streak >= 5;
+  if (lost && !servo_comm_lost) {
+    Serial.printf("E,%lu,servo_lost\n", now);
+    Serial.println("# WARNING: servos stopped answering (power / bus?)");
+    unlockBecause("servo_lost");
+  } else if (!lost && servo_comm_lost) {
+    Serial.printf("E,%lu,servo_back\n", now);
+    Serial.println("# servos answering again");
+  }
+  servo_comm_lost = lost;
 }
 
 // ==================== IMUs ====================
@@ -291,20 +327,41 @@ void initImus() {
   base_imu.last_ms = barrel_imu.last_ms = millis();
 }
 
-// Each Game Rotation Vector sample. The rate is the quaternion difference
-// over the sensor's fixed report period (arrival-time jitter would add noise).
+// Each Game Rotation Vector sample. The rate is the quaternion difference over
+// the time since the previous sample. Lead test v1 showed why this needs care:
+// after a 200+ ms data gap the old code divided a 23 deg jump by 5 ms
+// (-> 1250 deg/s) and the prediction threw the barrel across its range.
+//   * dt = arrival interval, floored at the report period (burst reads)
+//   * a gap longer than RATE_GAP_MS resets the rate and blocks prediction
+//     until RATE_GOOD_SAMPLES clean samples have arrived again
+//   * the raw rate is clamped to a physically plausible hand-motion limit
+constexpr float    RATE_MAX_DPS      = 600.0f;
+constexpr uint32_t RATE_GAP_MS       = 20;
+constexpr int      RATE_GOOD_SAMPLES = 4;
 void onImuSample(ImuState &s, Quat q) {
   q = quatNorm(q);
+  uint32_t now_us = micros();
   if (s.has_data) {
-    Quat dq = quatMul(quatConj(s.q), q);          // body-frame rotation since the last sample
-    if (dq.w < 0) { dq.w = -dq.w; dq.x = -dq.x; dq.y = -dq.y; dq.z = -dq.z; }
-    float dt = IMU_PERIOD_MS * 0.001f;
-    Vec3 w_raw = {2 * dq.x / dt, 2 * dq.y / dt, 2 * dq.z / dt};
-    float a = dt / (rate_tau_s + dt);
-    s.w_body.x += a * (w_raw.x - s.w_body.x);
-    s.w_body.y += a * (w_raw.y - s.w_body.y);
-    s.w_body.z += a * (w_raw.z - s.w_body.z);
+    uint32_t gap_us = now_us - s.last_us;
+    if (gap_us > RATE_GAP_MS * 1000UL) {
+      s.w_body = {0, 0, 0};
+      s.rate_good = 0;
+    } else {
+      Quat dq = quatMul(quatConj(s.q), q);        // body-frame rotation since the last sample
+      if (dq.w < 0) { dq.w = -dq.w; dq.x = -dq.x; dq.y = -dq.y; dq.z = -dq.z; }
+      float dt = fmaxf(gap_us * 1e-6f, IMU_PERIOD_MS * 0.001f);
+      Vec3 w_raw = {2 * dq.x / dt, 2 * dq.y / dt, 2 * dq.z / dt};
+      float mag = sqrtf(w_raw.x * w_raw.x + w_raw.y * w_raw.y + w_raw.z * w_raw.z);
+      float lim = RATE_MAX_DPS * DEG2RAD;
+      if (mag > lim) { float k = lim / mag; w_raw.x *= k; w_raw.y *= k; w_raw.z *= k; }
+      float a = dt / (rate_tau_s + dt);
+      s.w_body.x += a * (w_raw.x - s.w_body.x);
+      s.w_body.y += a * (w_raw.y - s.w_body.y);
+      s.w_body.z += a * (w_raw.z - s.w_body.z);
+      if (s.rate_good < RATE_GOOD_SAMPLES) s.rate_good++;
+    }
   }
+  s.last_us = now_us;
   s.q_prev = s.q;
   s.q = q;
   s.R = quatToMat3(q);
@@ -361,6 +418,7 @@ void lock() {
   barrel_R_at_lock = barrel_imu.R;
   aim_az = aim_el = 0;
   int_az = int_el = 0;
+  az_vel = el_vel = 0;
   setCmd(az_servo, lock_az);
   setCmd(el_servo, lock_el);
   lock_ms = millis();
@@ -398,10 +456,13 @@ void controlStep(float dt) {
 
   // ---- feedforward: where must the joints be for the base's (predicted) attitude? ----
   Mat3 Rb = base_imu.R;
-  bool use_lead = (control_mode == 2 || control_mode == 3) && lead_ms > 0;
+  bool use_lead = (control_mode == 2 || control_mode == 3) && lead_ms > 0 && base_imu.rate_good >= RATE_GOOD_SAMPLES;
   if (use_lead) {
     float T = lead_ms * 0.001f;
     Vec3 r = {base_imu.w_body.x * T, base_imu.w_body.y * T, base_imu.w_body.z * T};
+    float ang = sqrtf(r.x * r.x + r.y * r.y + r.z * r.z);
+    float max_ang = LEAD_MAX_DEG * DEG2RAD;                        // never predict a wild jump
+    if (ang > max_ang) { float k = max_ang / ang; r.x *= k; r.y *= k; r.z *= k; }
     Rb = matMul(Rb, expRot(r));                                    // body-frame rotation over T
   }
   dirToAzEl(matTVec(Rb, target_base_world), ff_az, ff_el);
@@ -411,11 +472,13 @@ void controlStep(float dt) {
   if (use_fb) {
     float cos_el = fmaxf(cosf(el_servo.cmd_deg * DEG2RAD), 0.3f);   // az joint moves the barrel by cos(el)
     float e_az = err_az / cos_el, e_el = err_el;
-    // anti-windup: do not integrate further into a saturated joint
+    // anti-windup: do not integrate further into a saturated joint, and freeze
+    // the integrator when the error is large (FF's job / a glitch) or data is old
     bool az_sat = (az_servo.cmd_deg >= az_servo.max_deg && e_az > 0) || (az_servo.cmd_deg <= az_servo.min_deg && e_az < 0);
     bool el_sat = (el_servo.cmd_deg >= el_servo.max_deg && e_el > 0) || (el_servo.cmd_deg <= el_servo.min_deg && e_el < 0);
-    if (!az_sat) int_az = clampf(int_az + ki_fb * e_az * dt, -fb_int_limit, fb_int_limit);
-    if (!el_sat) int_el = clampf(int_el + ki_fb * e_el * dt, -fb_int_limit, fb_int_limit);
+    bool freeze = err_tot > FB_FREEZE_ERR_DEG || (millis() - barrel_imu.last_ms) > 30 || servo_comm_lost;
+    if (!az_sat && !freeze) int_az = clampf(int_az + ki_fb * e_az * dt, -fb_int_limit, fb_int_limit);
+    if (!el_sat && !freeze) int_el = clampf(int_el + ki_fb * e_el * dt, -fb_int_limit, fb_int_limit);
     fb_az = kp_fb * e_az + int_az;
     fb_el = kp_fb * e_el + int_el;
   } else {
@@ -430,6 +493,24 @@ void controlStep(float dt) {
     case 4:         az_cmd = lock_az + fb_az; el_cmd = lock_el + fb_el; break;
     default: break;
   }
+  // Slew limit: the command may not move faster than slew_dps. The servo cannot
+  // follow faster anyway, and slamming draws current spikes that knocked the
+  // servo bus out in lead test v1 / emi_servo_slam.
+  // Accel limit on top: the command's speed may change by at most accel_dps2*dt
+  // per step. Hand motion needs <~1300 deg/s^2 (aggressive demo), so 4000 does
+  // not slow tracking but rounds off jumps; volt_slam showed hard starts sag the
+  // 8 V servo supply from 7.9 to 6.6 V and knock the IMUs/servos off their buses.
+  auto limitAxis = [&](float target, float cur, float &vel) {
+    float v_want = clampf((target - cur) / dt, -slew_dps, slew_dps);
+    float dv = accel_dps2 * dt;
+    vel = clampf(v_want, vel - dv, vel + dv);
+    // do not overshoot: if we cannot stop before the target at this accel, brake
+    float v_stop = sqrtf(2.0f * accel_dps2 * fabsf(target - cur));
+    vel = clampf(vel, -v_stop, v_stop);
+    return cur + vel * dt;
+  };
+  az_cmd = limitAxis(az_cmd, az_servo.cmd_deg, az_vel);
+  el_cmd = limitAxis(el_cmd, el_servo.cmd_deg, el_vel);
   setCmd(az_servo, az_cmd);
   setCmd(el_servo, el_cmd);
   sendServos(stab_speed);
@@ -478,9 +559,11 @@ void printHealth(uint32_t now, uint32_t window_ms) {
   float sc = 1000.0f / window_ms;
   uint32_t ok = az_servo.reads_ok + el_servo.reads_ok;
   uint32_t tot = ok + az_servo.reads_fail + el_servo.reads_fail;
-  Serial.printf("S,%lu,base_hz=%.0f,brl_hz=%.0f,ctrl_hz=%.0f,servo_ok=%lu/%lu,loop_max_us=%lu,mode=%d,locked=%d,recoveries=%lu,dropped=%lu\n",
+  Serial.printf("S,%lu,base_hz=%.0f,brl_hz=%.0f,ctrl_hz=%.0f,servo_ok=%lu/%lu,loop_max_us=%lu,mode=%d,locked=%d,recoveries=%lu,dropped=%lu,volt_min=%.1f/%.1f,temp=%d/%d\n",
                 now, base_imu.count * sc, barrel_imu.count * sc, ctrl_count * sc, ok, tot, loop_max_us,
-                control_mode, locked ? 1 : 0, imu_recoveries, lines_dropped);
+                control_mode, locked ? 1 : 0, imu_recoveries, lines_dropped,
+                az_servo.volt_min_dv * 0.1f, el_servo.volt_min_dv * 0.1f, az_servo.temp_c, el_servo.temp_c);
+  az_servo.volt_min_dv = el_servo.volt_min_dv = 255;
   base_imu.count = barrel_imu.count = ctrl_count = 0;
   az_servo.reads_ok = az_servo.reads_fail = el_servo.reads_ok = el_servo.reads_fail = 0;
   loop_max_us = 0;
@@ -499,8 +582,8 @@ const char *modeName(int m) {
 }
 
 void printInfo() {
-  Serial.printf("# mode %d %s | lead %.0f ms | kp %.2f ki %.2f | locked %s | stream %lu Hz\n",
-                control_mode, modeName(control_mode), lead_ms, kp_fb, ki_fb, locked ? "yes" : "no", 1000 / stream_period_ms);
+  Serial.printf("# mode %d %s | lead %.0f ms | kp %.2f ki %.2f | slew %.0f | locked %s | stream %lu Hz\n",
+                control_mode, modeName(control_mode), lead_ms, kp_fb, ki_fb, slew_dps, locked ? "yes" : "no", 1000 / stream_period_ms);
   Serial.printf("# limits AZ [%.0f, %.0f] EL [%.0f, %.0f] | servo speed manual %u stab %u | IMUs base %s barrel %s\n",
                 AZIMUTH_MIN_DEG, AZIMUTH_MAX_DEG, ELEVATION_MIN_DEG, ELEVATION_MAX_DEG, manual_speed, stab_speed,
                 base_imu.ready ? "OK" : "FAIL", barrel_imu.ready ? "OK" : "FAIL");
@@ -508,7 +591,7 @@ void printInfo() {
 
 void printHelp() {
   Serial.println("# l | m <0..4> | aim <daz> <del> | lead <ms> | kp <v> | ki <v> | az <d> | el <d> | go <az> <el> | c | on | off");
-  Serial.println("# spd <n> | sspd <n> | rate <hz> | stream on|off | mark <text> | info | help");
+  Serial.println("# slew <dps> | accel <dps2> | spd <n> | sspd <n> | rate <hz> | stream on|off | mark <text> | info | help");
   Serial.println("# modes: 0 HOLD, 1 FF, 2 FF+LEAD, 3 FULL, 4 FB only");
 }
 
@@ -538,6 +621,8 @@ void handleCommand(String line) {
     setAim(rest.substring(0, sp).toFloat(), rest.substring(sp + 1).toFloat());
   }
   else if (line.startsWith("lead ")) { lead_ms = clampf(line.substring(5).toFloat(), 0, 300); Serial.printf("# lead %.0f ms\n", lead_ms); }
+  else if (line.startsWith("slew ")) { slew_dps = clampf(line.substring(5).toFloat(), 10, 2000); Serial.printf("# slew %.0f deg/s\n", slew_dps); }
+  else if (line.startsWith("accel ")) { accel_dps2 = clampf(line.substring(6).toFloat(), 100, 100000); Serial.printf("# accel %.0f deg/s^2\n", accel_dps2); }
   else if (line.startsWith("kp "))   { kp_fb = line.substring(3).toFloat(); Serial.printf("# kp %.3f\n", kp_fb); }
   else if (line.startsWith("ki "))   { ki_fb = line.substring(3).toFloat(); int_az = int_el = 0; Serial.printf("# ki %.3f\n", ki_fb); }
   else if (line == "c") manualMove(0, 0);
@@ -589,7 +674,7 @@ void setup() {
 
   Serial1.begin(1000000, SERIAL_8N1, SERVO_RX_PIN, SERVO_TX_PIN);
   servo_bus.pSerial = &Serial1;
-  servo_bus.IOTimeOut = 3;
+  servo_bus.IOTimeOut = 2;
   delay(100);
   Serial.printf("# Ping AZ: %s | EL: %s\n", servo_bus.Ping(AZIMUTH_ID) != -1 ? "OK" : "FAIL",
                 servo_bus.Ping(ELEVATION_ID) != -1 ? "OK" : "FAIL");
@@ -644,8 +729,7 @@ void loop() {
   static uint32_t last_stream_ms = 0;
   if (now - last_stream_ms >= stream_period_ms) {
     last_stream_ms = now;
-    readServo(az_servo);
-    readServo(el_servo);
+    readServosSafely(now);
     if (streaming) printData(now);
   }
 

@@ -21,6 +21,8 @@ struct ImuState {
   Mat3 R = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};   // body -> world
   Vec3 w_body = {0, 0, 0};     // filtered angular rate in body frame [rad/s]
   uint32_t last_ms = 0;
+  uint32_t last_us = 0;        // arrival time of the last sample (for the rate estimate)
+  int rate_good = 0;           // consecutive clean samples since the last data gap
   uint32_t count = 0;          // samples since last health line
   uint32_t resets = 0;
 };
@@ -36,4 +38,8 @@ struct ServoState {
   int meas_tick = -1;
   int meas_load = 0;
   uint32_t reads_ok = 0, reads_fail = 0;
+  uint32_t fail_streak = 0;    // consecutive failed reads
+  int volt_dv = 0;             // supply voltage seen by the servo [0.1 V]
+  int volt_min_dv = 255;       // lowest voltage since the last health line
+  int temp_c = 0;
 };
