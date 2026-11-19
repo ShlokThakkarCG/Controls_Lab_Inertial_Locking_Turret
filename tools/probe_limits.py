@@ -29,6 +29,7 @@ ap.add_argument("--step", type=int, default=5)
 ap.add_argument("--max-load", type=float, default=120)
 ap.add_argument("--max-lag", type=float, default=7)
 ap.add_argument("--settle", type=float, default=0.6)
+ap.add_argument("--end-margin", type=int, default=15, help="ticks kept clear of the servo end stops 0/1023")
 args = ap.parse_args()
 
 con = tc.Console(args.port or tc.find_port(), 921600, f"limit_{args.axis}_{args.stop}", show_data=False, show_status=False)
@@ -49,7 +50,7 @@ last_ok = args.start
 reason = "reached --stop"
 try:
     for tick in range(args.start, args.stop + direction, direction * args.step):
-        if tick < 15 or tick > 1008:            # keep clear of the servo's own end stops
+        if tick < args.end_margin or tick > 1023 - args.end_margin:   # keep clear of the servo's own end stops
             reason = f"tick {tick} too close to servo end stop (0/1023)"
             break
         con.send(f"{cmd} {tick}")

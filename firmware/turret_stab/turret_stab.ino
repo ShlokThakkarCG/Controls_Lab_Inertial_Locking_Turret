@@ -35,6 +35,7 @@
  *   kp <v> / ki <v>   feedback gains (deg per deg, 1/s)
  *   slew <dps>        max command speed while locked (default 400)
  *   accel <dps2>      max command acceleration while locked (default 4000)
+ *   rtau <ms>         low-pass time constant of the base rate used for lead (default 15)
  *   az <d> / el <d> / go <az> <el> / c   manual moves (unlocks first)
  *   on / off          servo torque
  *   spd <n>           manual move speed (0 = max)     sspd <n>  stabilizer servo speed (0 = max)
@@ -74,7 +75,7 @@ constexpr uint8_t ELEVATION_ID           = 1;
 constexpr int     ELEVATION_ZERO_TICK    = 898;
 constexpr int     ELEVATION_DIR          = -1;
 constexpr float   ELEVATION_DEG_PER_TICK = 0.2228f;
-constexpr float   ELEVATION_MIN_DEG      = -20.0f;
+constexpr float   ELEVATION_MIN_DEG      = -18.0f;   // 2026-11-20 probe: barrel meets resistance at ~-19 deg (tick ~992); servo electrical end ~-27.8 deg
 constexpr float   ELEVATION_MAX_DEG      = +55.0f;
 
 // ==================== CONTROL PARAMETERS (runtime-tunable) ====================
@@ -648,7 +649,7 @@ void printInfo() {
 
 void printHelp() {
   Serial.println("# l | m <0..4> | aim <daz> <del> | lead <ms> | kp <v> | ki <v> | az <d> | el <d> | go <az> <el> | c | on | off");
-  Serial.println("# slew <dps> | accel <dps2> | spd <n> | sspd <n> | rate <hz> | stream on|off | mark <text> | info | help");
+  Serial.println("# slew <dps> | accel <dps2> | rtau <ms> | spd <n> | sspd <n> | rate <hz> | stream on|off | mark <text> | info | help");
   Serial.println("# modes: 0 HOLD, 1 FF, 2 FF+LEAD, 3 FULL, 4 FB only");
 }
 
@@ -680,6 +681,7 @@ void handleCommand(String line) {
   else if (line.startsWith("lead ")) { lead_ms = clampf(line.substring(5).toFloat(), 0, 300); Serial.printf("# lead %.0f ms\n", lead_ms); }
   else if (line.startsWith("slew ")) { slew_dps = clampf(line.substring(5).toFloat(), 10, 2000); Serial.printf("# slew %.0f deg/s\n", slew_dps); }
   else if (line.startsWith("accel ")) { accel_dps2 = clampf(line.substring(6).toFloat(), 100, 100000); Serial.printf("# accel %.0f deg/s^2\n", accel_dps2); }
+  else if (line.startsWith("rtau ")) { rate_tau_s = clampf(line.substring(5).toFloat(), 1, 200) * 0.001f; Serial.printf("# rate filter %.0f ms\n", rate_tau_s * 1000); }
   else if (line.startsWith("kp "))   { kp_fb = line.substring(3).toFloat(); Serial.printf("# kp %.3f\n", kp_fb); }
   else if (line.startsWith("ki "))   { ki_fb = line.substring(3).toFloat(); int_az = int_el = 0; Serial.printf("# ki %.3f\n", ki_fb); }
   else if (line == "c") manualMove(0, 0);
