@@ -1,0 +1,25 @@
+# Personal reimbursement documents: never published
+reimb/
+
+# Build outputs
+build/
+*.bin
+*.elf
+*.map
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# MATLAB autosave / cache
+*.asv
+*.mex*
+slprj/
+*.slxc
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.vscode/
+enr312_stabilized_turret_esp32c6.text

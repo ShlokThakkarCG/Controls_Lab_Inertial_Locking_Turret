@@ -1,0 +1,25 @@
+     0.302 >> stream on
+     0.302 >> info
+     0.303 >> scan
+     0.533 << (0 devices)
+     0.854 >> imuinit
+     1.392 << # Base IMU (0x4A) attempt 1: FAIL
+     2.242 << # Base IMU (0x4A) attempt 2: FAIL
+     3.095 << # Base IMU (0x4A) attempt 3: FAIL
+     4.170 << # Barrel IMU (0x4B) attempt 1: FAIL
+     5.012 << # Barrel IMU (0x4B) attempt 2: FAIL
+     5.992 << # Barrel IMU (0x4B) attempt 3: FAIL
+     5.992 << # stream=on rate=50 Hz | i2c=50 kHz | imu period=20 ms | servo speed=1200
+     5.992 << # AZ id=2 zero=623 dir=+1 lim=[-60,60] | EL id=1 zero=878 dir=-1 lim=[-9,35] | 0.20508 deg/tick
+     5.992 << # IMUs: base FAIL, barrel FAIL | tared=no
+     5.992 << # Commands: help | stream on|off | rate <hz> | z | c | az <deg> | el <deg> | go <az> <el>
+     5.992 << #           taz <tick> | tel <tick> | spd <n> | on | off | i2c <khz> | imu <ms> | mark <text> | info
+     5.992 << #           scan (list I2C devices) | imuinit (recover bus + retry both IMUs)
+     5.992 << H,t_ms,seq,bq_w,bq_x,bq_y,bq_z,b_acc,rq_w,rq_x,rq_y,rq_z,r_acc,base_yaw,base_pitch,base_roll,brl_yaw,brl_pitch,brl_roll,imu_az,imu_el,cmd_az,cmd_el,meas_az,meas_el,cmd_az_tick,cmd_el_tick,meas_az_tick,meas_el_tick,az_speed,el_speed,az_load,el_load,base_age_ms,brl_age_ms
+     5.992 << E,14011,cmd,stream on
+     5.992 << H,t_ms,seq,bq_w,bq_x,bq_y,bq_z,b_acc,rq_w,rq_x,rq_y,rq_z,r_acc,base_yaw,base_pitch,base_roll,brl_yaw,brl_pitch,brl_roll,imu_az,imu_el,cmd_az,cmd_el,meas_az,meas_el,cmd_az_tick,cmd_el_tick,meas_az_tick,meas_el_tick,az_speed,el_speed,az_load,el_load,base_age_ms,brl_age_ms
+     5.992 << E,14011,cmd,info
+     5.992 << # stream=on rate=50 Hz | i2c=50 kHz | imu period=20 ms | servo speed=1200
+     5.992 << # AZ id=2 zero=623 dir=+1 lim=[-60,60] | EL id=1 zero=878 dir=-1 lim=[-9,35] | 0.20508 deg/tick
+     5.992 << # IMUs: base FAIL, barrel FAIL | tared=no
+     5.992 << E,14012,cmd,scan

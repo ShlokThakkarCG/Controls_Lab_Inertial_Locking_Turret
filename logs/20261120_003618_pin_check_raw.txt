@@ -1,0 +1,6 @@
+     0.301 >> stream on
+     0.301 >> info
+     0.301 >> pins
+     0.524 << (0 devices)
+     1.486 << # Base IMU (0x4A) attempt 1: FAIL
+     2.421 << # Base IMU (0x4A) attempt 2: FAIL

@@ -1,0 +1,8 @@
+     0.309 >> stream on
+     0.309 >> info
+     0.321 << Commands: l | m1 | m2 | m3 | az <deg> | el <deg> | 0 0 | r | p <val> | i <val> | csv | off | on
+     0.321 << Commands: l | m1 | m2 | m3 | az <deg> | el <deg> | 0 0 | r | p <val> | i <val> | csv | off | on
+     1.309 >> l
+     1.364 << Cannot LOCK yet: waiting for both IMUs to send data.
+     2.360 >> r
+     2.415 << RAW TICKS -> AZ (ID 2): 625 | EL (ID 1): 881
