@@ -69,6 +69,7 @@ class Console:
         self.show_status = show_status
         self.last_show = 0.0
         self.running = True
+        self.latest = {}            # most recent D line as {column: float}, for scripts
         self.lock = threading.Lock()
         self.t_start = time.time()
 
@@ -113,6 +114,13 @@ class Console:
                 if self.header_written:
                     self.csv.write(line[2:] + "\n")
                     self.n_rows += 1
+                    vals = line[2:].split(",")
+                    cols = self.header.split(",")
+                    if len(vals) == len(cols):
+                        try:
+                            self.latest = dict(zip(cols, map(float, vals)))
+                        except ValueError:
+                            pass
                 if self.show_data and time.time() - self.last_show > 0.5:
                     self.last_show = time.time()
                     self.print_summary(line[2:])

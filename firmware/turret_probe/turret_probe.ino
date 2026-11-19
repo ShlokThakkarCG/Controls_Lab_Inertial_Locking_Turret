@@ -74,12 +74,14 @@ constexpr float   AZIMUTH_MIN_DEG   = -60.0f;
 constexpr float   AZIMUTH_MAX_DEG   = +60.0f;
 
 constexpr uint8_t ELEVATION_ID        = 1;
-constexpr int     ELEVATION_ZERO_TICK = 878;
+constexpr int     ELEVATION_ZERO_TICK = 925;    // 2026-11-20: barrel parallel to base plate (gravity, el_calibration log); legacy 878 was ~10 deg nose-up
 constexpr int     ELEVATION_DIR       = -1;
-constexpr float   ELEVATION_MIN_DEG   = -9.0f;
-constexpr float   ELEVATION_MAX_DEG   = +35.0f;
+constexpr float   ELEVATION_MIN_DEG   = -15.0f;   // probed clean down to tick 1011 (~-17 deg)
+constexpr float   ELEVATION_MAX_DEG   = +45.0f;   // probed clean up to tick 606 (~+60 deg); margin kept
 
-constexpr float DEG_PER_TICK = 210.0f / 1024.0f;   // to be verified against IMUs
+// Measured against the IMUs (datasheet nominal 210/1024 = 0.2051 deg/tick):
+constexpr float AZIMUTH_DEG_PER_TICK   = 0.2092f;   // az sweep fit, +2.0% vs nominal
+constexpr float ELEVATION_DEG_PER_TICK = 0.2255f;   // el_calibration fit (up/down averaged), +10% vs nominal
 
 // ==================== MATH ====================
 constexpr float RAD2DEG = 57.29577951f;
@@ -147,13 +149,13 @@ ImuState barrel_imu;
 // ==================== SERVO STATE ====================
 SCSCL servo_bus;
 
-ServoState az_servo = {AZIMUTH_ID, AZIMUTH_ZERO_TICK, AZIMUTH_DIR, AZIMUTH_MIN_DEG, AZIMUTH_MAX_DEG};
-ServoState el_servo = {ELEVATION_ID, ELEVATION_ZERO_TICK, ELEVATION_DIR, ELEVATION_MIN_DEG, ELEVATION_MAX_DEG};
+ServoState az_servo = {AZIMUTH_ID, AZIMUTH_ZERO_TICK, AZIMUTH_DIR, AZIMUTH_MIN_DEG, AZIMUTH_MAX_DEG, AZIMUTH_DEG_PER_TICK};
+ServoState el_servo = {ELEVATION_ID, ELEVATION_ZERO_TICK, ELEVATION_DIR, ELEVATION_MIN_DEG, ELEVATION_MAX_DEG, ELEVATION_DEG_PER_TICK};
 
 uint16_t servo_speed = 1200;
 
-float tickToDeg(const ServoState &s, int tick) { return s.dir * (tick - s.zero_tick) * DEG_PER_TICK; }
-int   degToTick(const ServoState &s, float deg) { return s.zero_tick + (int)roundf(s.dir * deg / DEG_PER_TICK); }
+float tickToDeg(const ServoState &s, int tick) { return s.dir * (tick - s.zero_tick) * s.deg_per_tick; }
+int   degToTick(const ServoState &s, float deg) { return s.zero_tick + (int)roundf(s.dir * deg / s.deg_per_tick); }
 
 void writeServoTick(ServoState &s, int tick) {
   s.cmd_tick = constrain(tick, 0, 1023);
@@ -192,6 +194,7 @@ Mat3     joint_offset  = IDENTITY;  // maps barrel-world into base-world (set at
 bool     tared         = false;
 uint32_t seq           = 0;
 uint32_t loop_max_us   = 0;
+uint32_t lines_dropped = 0;   // D lines skipped because the USB buffer was full
 
 // ==================== I2C / IMU SETUP ====================
 // Hardware-reset both BNO08x. An ESP32 reset in the middle of an I2C read can
@@ -342,7 +345,8 @@ void printData(uint32_t now) {
     Mat3 Rj = matMul(matMul(matT(base_imu.R), joint_offset), barrel_imu.R);
     matToAzEl(Rj, jaz, jel);
   }
-  Serial.printf("D,%lu,%lu,"
+  char buf[400];
+  int n = snprintf(buf, sizeof(buf), "D,%lu,%lu,"
                 "%.5f,%.5f,%.5f,%.5f,%u,"
                 "%.5f,%.5f,%.5f,%.5f,%u,"
                 "%.2f,%.2f,%.2f,"
@@ -362,15 +366,19 @@ void printData(uint32_t now) {
                 az_servo.cmd_tick, el_servo.cmd_tick, az_servo.meas_tick, el_servo.meas_tick,
                 az_servo.meas_speed, el_servo.meas_speed, az_servo.meas_load, el_servo.meas_load,
                 now - base_imu.last_ms, now - barrel_imu.last_ms);
+  // Send the whole line or nothing: a truncated CSV row is worse than a missing one.
+  if (n > 0 && n < (int)sizeof(buf) && Serial.availableForWrite() >= n) Serial.write((const uint8_t *)buf, n);
+  else lines_dropped++;
 }
 
 void printHealth(uint32_t now, uint32_t window_ms) {
   float scale = 1000.0f / window_ms;
   uint32_t ok = az_servo.reads_ok + el_servo.reads_ok;
   uint32_t total = ok + az_servo.reads_fail + el_servo.reads_fail;
-  Serial.printf("S,%lu,base_hz=%.1f,brl_hz=%.1f,servo_ok=%lu/%lu,loop_max_us=%lu,i2c_khz=%lu,imu_ms=%u,imu_resets=%lu/%lu,recoveries=%lu\n",
+  Serial.printf("S,%lu,base_hz=%.1f,brl_hz=%.1f,servo_ok=%lu/%lu,loop_max_us=%lu,i2c_khz=%lu,imu_ms=%u,imu_resets=%lu/%lu,recoveries=%lu,dropped=%lu\n",
                 now, base_imu.count * scale, barrel_imu.count * scale, ok, total,
-                loop_max_us, i2c_khz, imu_period_ms, base_imu.resets, barrel_imu.resets, imu_recoveries);
+                loop_max_us, i2c_khz, imu_period_ms, base_imu.resets, barrel_imu.resets, imu_recoveries, lines_dropped);
+  lines_dropped = 0;
   base_imu.count = barrel_imu.count = 0;
   az_servo.reads_ok = az_servo.reads_fail = el_servo.reads_ok = el_servo.reads_fail = 0;
   loop_max_us = 0;
@@ -379,9 +387,9 @@ void printHealth(uint32_t now, uint32_t window_ms) {
 void printInfo() {
   Serial.printf("# stream=%s rate=%lu Hz | i2c=%lu kHz | imu period=%u ms | servo speed=%u\n",
                 streaming ? "on" : "off", 1000 / stream_period_ms, i2c_khz, imu_period_ms, servo_speed);
-  Serial.printf("# AZ id=%u zero=%d dir=%+d lim=[%.0f,%.0f] | EL id=%u zero=%d dir=%+d lim=[%.0f,%.0f] | %.5f deg/tick\n",
-                az_servo.id, az_servo.zero_tick, az_servo.dir, az_servo.min_deg, az_servo.max_deg,
-                el_servo.id, el_servo.zero_tick, el_servo.dir, el_servo.min_deg, el_servo.max_deg, DEG_PER_TICK);
+  Serial.printf("# AZ id=%u zero=%d dir=%+d lim=[%.0f,%.0f] %.4f deg/tick | EL id=%u zero=%d dir=%+d lim=[%.0f,%.0f] %.4f deg/tick\n",
+                az_servo.id, az_servo.zero_tick, az_servo.dir, az_servo.min_deg, az_servo.max_deg, az_servo.deg_per_tick,
+                el_servo.id, el_servo.zero_tick, el_servo.dir, el_servo.min_deg, el_servo.max_deg, el_servo.deg_per_tick);
   Serial.printf("# IMUs: base %s, barrel %s | tared=%s\n",
                 base_imu.ready ? "OK" : "FAIL", barrel_imu.ready ? "OK" : "FAIL", tared ? "yes" : "no");
 }
@@ -479,8 +487,9 @@ void pollSerial() {
 
 // ==================== SETUP ====================
 void setup() {
+  Serial.setTxBufferSize(4096);   // must be set before begin()
   Serial.begin(USB_BAUD);
-  Serial.setTxTimeoutMs(0);   // never block the loop when no PC is reading the USB port
+  Serial.setTxTimeoutMs(5);   // cap blocking when no PC is reading; D lines are also gated in printData()
   delay(1500);
   Serial.println("\n# === turret_probe (Phase 0 diagnostics) ===");
   pinMode(MARK_BUTTON_PIN, INPUT_PULLUP);

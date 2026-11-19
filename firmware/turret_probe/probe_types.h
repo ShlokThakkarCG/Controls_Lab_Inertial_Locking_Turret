@@ -28,6 +28,7 @@ struct ServoState {
   int zero_tick;
   int dir;
   float min_deg, max_deg;
+  float deg_per_tick;
   float cmd_deg = 0;
   int cmd_tick = -1;
   int meas_tick = -1;
