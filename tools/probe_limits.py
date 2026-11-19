@@ -46,6 +46,9 @@ last_ok = args.start
 reason = "reached --stop"
 try:
     for tick in range(args.start, args.stop + direction, direction * args.step):
+        if tick < 15 or tick > 1008:            # keep clear of the servo's own end stops
+            reason = f"tick {tick} too close to servo end stop (0/1023)"
+            break
         con.send(f"{cmd} {tick}")
         time.sleep(args.settle)
         for _ in range(5):                     # tolerate a missed reply / empty first sample
@@ -55,9 +58,14 @@ try:
                 break
             time.sleep(0.1)
         lag = abs(tick - meas)
-        print(f"  cmd {tick:5d}  meas {meas:6.0f}  lag {lag:4.0f}  load {load:+5.0f}  brl_pitch {d.get('brl_pitch', 0):+6.2f}")
+        imu_age = max(d.get("base_age_ms", 0), d.get("brl_age_ms", 0))
+        print(f"  cmd {tick:5d}  meas {meas:6.0f}  lag {lag:4.0f}  load {load:+5.0f}  "
+              f"brl_yaw {d.get('brl_yaw', 0):+6.1f}  brl_pitch {d.get('brl_pitch', 0):+6.1f}  imu_age {imu_age:4.0f}")
         if meas < 0:
             reason = "servo read failed"
+            break
+        if imu_age > 200:                       # an IMU went quiet: likely a wire being pulled
+            reason = f"IMU silent for {imu_age:.0f} ms (wire strain?)"
             break
         if abs(load) > args.max_load:
             reason = f"load {load:+.0f} > {args.max_load}"

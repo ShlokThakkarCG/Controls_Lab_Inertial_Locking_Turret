@@ -66,22 +66,25 @@ constexpr uint32_t USB_BAUD = 921600;
 constexpr uint8_t BASE_IMU_ADDRESS   = 0x4B;
 constexpr uint8_t BARREL_IMU_ADDRESS = 0x4A;
 
-// ==================== SERVO CALIBRATION (from legacy code, to be verified) ====================
-constexpr uint8_t AZIMUTH_ID        = 2;
-constexpr int     AZIMUTH_ZERO_TICK = 623;
-constexpr int     AZIMUTH_DIR       = -1;     // measured: ticks UP turn the barrel RIGHT, so +deg (left) = ticks down
-constexpr float   AZIMUTH_MIN_DEG   = -60.0f;
-constexpr float   AZIMUTH_MAX_DEG   = +60.0f;
+// ==================== SERVO CALIBRATION ====================
+// Re-measured 2026-11-20 after the hardware rework (taped wires, tightened screws).
+// Logs: el_level_recheck, limit_el_*, limit_az_*, el_calibration_v2, az_calibration_v2.
+// Datasheet nominal is 210/1024 = 0.2051 deg/tick; both servos measure higher.
+// Each servo stops ~4 ticks short of target from either side (deadband):
+// ~2.9 deg elevation / ~1.5 deg azimuth hysteresis between up- and down-approach.
+constexpr uint8_t AZIMUTH_ID           = 2;
+constexpr int     AZIMUTH_ZERO_TICK    = 623;      // straight ahead (visual; IMUs cannot measure heading)
+constexpr int     AZIMUTH_DIR          = -1;       // ticks UP turn the barrel RIGHT, so +deg (left) = ticks down
+constexpr float   AZIMUTH_DEG_PER_TICK = 0.2149f;  // linear fit, residual max 1.3 deg over -77..+116
+constexpr float   AZIMUTH_MIN_DEG      = -75.0f;   // clean travel probed to -82 (tick 1003, servo end)
+constexpr float   AZIMUTH_MAX_DEG      = +110.0f;  // clean travel probed to +129 (tick 23, servo end)
 
-constexpr uint8_t ELEVATION_ID        = 1;
-constexpr int     ELEVATION_ZERO_TICK = 925;    // 2026-11-20: barrel parallel to base plate (gravity, el_calibration log); legacy 878 was ~10 deg nose-up
-constexpr int     ELEVATION_DIR       = -1;
-constexpr float   ELEVATION_MIN_DEG   = -15.0f;   // probed clean down to tick 1011 (~-17 deg)
-constexpr float   ELEVATION_MAX_DEG   = +45.0f;   // probed clean up to tick 606 (~+60 deg); margin kept
-
-// Measured against the IMUs (datasheet nominal 210/1024 = 0.2051 deg/tick):
-constexpr float AZIMUTH_DEG_PER_TICK   = 0.2092f;   // az sweep fit, +2.0% vs nominal
-constexpr float ELEVATION_DEG_PER_TICK = 0.2255f;   // el_calibration fit (up/down averaged), +10% vs nominal
+constexpr uint8_t ELEVATION_ID           = 1;
+constexpr int     ELEVATION_ZERO_TICK    = 898;      // barrel parallel to base plate (gravity); was 925 before rework
+constexpr int     ELEVATION_DIR          = -1;       // +deg = up = ticks down
+constexpr float   ELEVATION_DEG_PER_TICK = 0.2228f;  // linear fit, residual rms 0.8 deg over -21..+60
+constexpr float   ELEVATION_MIN_DEG      = -20.0f;   // clean travel probed to -21 (tick 1005, servo end)
+constexpr float   ELEVATION_MAX_DEG      = +60.0f;   // load rises past ~+67 (tick ~555): barrel starts touching
 
 // ==================== MATH ====================
 constexpr float RAD2DEG = 57.29577951f;
