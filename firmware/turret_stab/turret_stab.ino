@@ -320,7 +320,7 @@ void initImus() {
   recoverI2CBus();
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(I2C_KHZ * 1000);
-  Wire.setTimeOut(50);
+  Wire.setTimeOut(10);              // a hiccup costs 10 ms, not 50-100
   beginImu(base_imu, BASE_IMU_ADDRESS, "Base");
   delay(100);
   beginImu(barrel_imu, BARREL_IMU_ADDRESS, "Barrel");
@@ -369,6 +369,42 @@ void onImuSample(ImuState &s, Quat q) {
   s.count++;
   s.has_data = true;
   s.fresh = true;
+  if (s.reanchor) reanchor(s);
+}
+
+// ---- keeping the lock across a single-IMU restart ----
+// After a restart an IMU's world frame (yaw zero) is new, so the target stored
+// in that frame is meaningless. The other IMU still holds the target, and the
+// servo angles link the two bodies:  base_body = R_turret(az, el) * barrel_body.
+void markReanchor(ImuState &s, const char *why) {
+  s.R_before = s.R;                     // last attitude in the old frame (for the lock-pose bookkeeping)
+  s.reanchor = true;
+  s.has_data = false;
+  s.rate_good = 0;
+  s.w_body = {0, 0, 0};
+  Serial.printf("E,%lu,reanchor_pending,%s,%s\n", millis(), s.name, why);
+}
+
+void reanchor(ImuState &s) {
+  s.reanchor = false;
+  if (!locked) return;
+  ImuState &o = (&s == &base_imu) ? barrel_imu : base_imu;
+  if (o.reanchor || !o.has_data || millis() - o.last_ms > 100) {
+    unlockBecause("reanchor_impossible");  // neither IMU holds a valid target any more
+    return;
+  }
+  Mat3 Rt = turretRot(servoActualDeg(az_servo), servoActualDeg(el_servo));
+  if (&s == &base_imu) {
+    Vec3 d_barrel = matTVec(barrel_imu.R, target_barrel_world);
+    target_base_world = matVec(base_imu.R, matVec(Rt, d_barrel));
+    base_R_at_lock = matMul(matMul(base_imu.R, matT(base_imu.R_before)), base_R_at_lock);
+  } else {
+    Vec3 d_base = matTVec(base_imu.R, target_base_world);
+    target_barrel_world = matVec(barrel_imu.R, matTVec(Rt, d_base));
+    barrel_R_at_lock = matMul(matMul(barrel_imu.R, matT(barrel_imu.R_before)), barrel_R_at_lock);
+  }
+  Serial.printf("E,%lu,reanchored,%s\n", millis(), s.name);
+  Serial.printf("# lock kept: %s IMU re-anchored from the other IMU\n", s.name);
 }
 
 void pollImu(ImuState &s) {
@@ -377,8 +413,7 @@ void pollImu(ImuState &s) {
     s.resets++;
     Serial.printf("# WARNING: %s IMU reset itself; re-enabling reports\n", s.name);
     s.dev.enableGameRotationVector(IMU_PERIOD_MS);
-    s.has_data = false;
-    unlockBecause("imu_reset");            // its world frame restarted: the lock target is meaningless now
+    markReanchor(s, "self_reset");         // its world frame restarted: carry the lock over from the other IMU
   }
   for (int i = 0; i < 4; i++) {
     uint16_t id = s.dev.getReadings();
@@ -388,16 +423,35 @@ void pollImu(ImuState &s) {
   }
 }
 
+// Lead test v2: an I2C hiccup silenced the base IMU, the old watchdog
+// hard-reset BOTH IMUs (shared RST) and the lock was lost. Now:
+//   1. only the silent IMU is restarted, in software, by its own address
+//   2. the lock target is re-anchored from the IMU that kept running
+//   3. hard reset of both (and unlock) only if the soft restart fails or both are silent
+constexpr uint32_t IMU_SILENT_MS = 300;
 void imuWatchdog(uint32_t now) {
   static uint32_t last_attempt_ms = 0;
-  if (now - last_attempt_ms < 2000) return;
-  bool base_stale   = now - base_imu.last_ms   > 500;
-  bool barrel_stale = now - barrel_imu.last_ms > 500;
-  if (!base_stale && !barrel_stale) return;
+  static int soft_failures = 0;
+  if (now - last_attempt_ms < 1000) return;
+  bool base_stale   = now - base_imu.last_ms   > IMU_SILENT_MS;
+  bool barrel_stale = now - barrel_imu.last_ms > IMU_SILENT_MS;
+  if (!base_stale && !barrel_stale) { soft_failures = 0; return; }
   last_attempt_ms = now;
   imu_recoveries++;
-  Serial.printf("E,%lu,imu_recover,base_stale=%d,barrel_stale=%d\n", now, base_stale, barrel_stale);
-  unlockBecause("imu_recover");
+  if (base_stale != barrel_stale && soft_failures < 2) {
+    ImuState &s = base_stale ? base_imu : barrel_imu;
+    Serial.printf("E,%lu,imu_soft_restart,%s\n", now, s.name);
+    markReanchor(s, "soft_restart");
+    s.ready = s.dev.begin(s.addr, Wire);
+    if (s.ready) s.dev.enableGameRotationVector(IMU_PERIOD_MS);
+    s.last_ms = millis();                    // give it time to deliver before judging again
+    Serial.printf("# %s IMU soft restart: %s\n", s.name, s.ready ? "OK" : "FAIL");
+    soft_failures = s.ready ? 0 : soft_failures + 1;
+    return;
+  }
+  Serial.printf("E,%lu,imu_hard_reset,base_stale=%d,barrel_stale=%d\n", now, base_stale, barrel_stale);
+  unlockBecause("imu_hard_reset");
+  soft_failures = 0;
   initImus();
 }
 
@@ -449,6 +503,7 @@ void toggleLock() {
 // ==================== CONTROLLER ====================
 void controlStep(float dt) {
   // ---- pointing error from the barrel IMU (truth metric + feedback input) ----
+  bool barrel_ok = !barrel_imu.reanchor && barrel_imu.has_data && (millis() - barrel_imu.last_ms) <= IMU_STALE_LOCK_MS;
   Vec3 d_brl = matTVec(barrel_imu.R, target_barrel_world);       // target seen from the barrel
   err_az  = atan2f(-d_brl.x, d_brl.y) * RAD2DEG;                  // + = target is left of the barrel
   err_el  = atan2f(d_brl.z, sqrtf(d_brl.x * d_brl.x + d_brl.y * d_brl.y)) * RAD2DEG;   // + = above
@@ -476,11 +531,12 @@ void controlStep(float dt) {
     // the integrator when the error is large (FF's job / a glitch) or data is old
     bool az_sat = (az_servo.cmd_deg >= az_servo.max_deg && e_az > 0) || (az_servo.cmd_deg <= az_servo.min_deg && e_az < 0);
     bool el_sat = (el_servo.cmd_deg >= el_servo.max_deg && e_el > 0) || (el_servo.cmd_deg <= el_servo.min_deg && e_el < 0);
-    bool freeze = err_tot > FB_FREEZE_ERR_DEG || (millis() - barrel_imu.last_ms) > 30 || servo_comm_lost;
+    bool freeze = err_tot > FB_FREEZE_ERR_DEG || !barrel_ok || servo_comm_lost;
     if (!az_sat && !freeze) int_az = clampf(int_az + ki_fb * e_az * dt, -fb_int_limit, fb_int_limit);
     if (!el_sat && !freeze) int_el = clampf(int_el + ki_fb * e_el * dt, -fb_int_limit, fb_int_limit);
-    fb_az = kp_fb * e_az + int_az;
-    fb_el = kp_fb * e_el + int_el;
+    float kp_now = barrel_ok ? kp_fb : 0.0f;          // no proportional kick from a stale error
+    fb_az = kp_now * e_az + int_az;
+    fb_el = kp_now * e_el + int_el;
   } else {
     fb_az = fb_el = 0;
   }
@@ -646,6 +702,14 @@ void handleCommand(String line) {
   }
   else if (line == "stream on")  { streaming = true; printHeader(); }
   else if (line == "stream off") { streaming = false; }
+  else if (line == "imurst base" || line == "imurst barrel") {   // test: restart one IMU like the watchdog does
+    ImuState &st = (line == "imurst base") ? base_imu : barrel_imu;
+    markReanchor(st, "test");
+    st.ready = st.dev.begin(st.addr, Wire);
+    if (st.ready) st.dev.enableGameRotationVector(IMU_PERIOD_MS);
+    st.last_ms = millis();
+    Serial.printf("# %s IMU test restart: %s\n", st.name, st.ready ? "OK" : "FAIL");
+  }
   else if (line.startsWith("mark")) Serial.printf("E,%lu,mark,%s\n", millis(), line.substring(4).c_str());
   else if (line == "info") printInfo();
   else if (line == "help") printHelp();
@@ -714,7 +778,7 @@ void loop() {
     uint32_t tu = micros();
     float dt = (last_ctrl_us == 0) ? IMU_PERIOD_MS * 0.001f : clampf((tu - last_ctrl_us) * 1e-6f, 0.001f, 0.05f);
     last_ctrl_us = tu;
-    bool stale = (now - base_imu.last_ms > IMU_STALE_LOCK_MS) || (now - barrel_imu.last_ms > IMU_STALE_LOCK_MS);
+    bool stale = (now - base_imu.last_ms > IMU_STALE_LOCK_MS) || base_imu.reanchor;   // FF needs the base IMU
     if (!stale) {
       controlStep(dt);
       ctrl_count++;

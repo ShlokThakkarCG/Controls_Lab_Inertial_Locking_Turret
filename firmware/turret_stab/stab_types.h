@@ -23,6 +23,8 @@ struct ImuState {
   uint32_t last_ms = 0;
   uint32_t last_us = 0;        // arrival time of the last sample (for the rate estimate)
   int rate_good = 0;           // consecutive clean samples since the last data gap
+  bool reanchor = false;       // world frame restarted: lock target must be carried over
+  Mat3 R_before = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};   // last attitude in the old frame
   uint32_t count = 0;          // samples since last health line
   uint32_t resets = 0;
 };
