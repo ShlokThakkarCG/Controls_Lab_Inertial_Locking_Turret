@@ -7,6 +7,7 @@ classdef TurretState < handle
     %   st.push(D);                    % D = numeric rows from TurretLink.poll
     %   [Rd, az, el, tgt, brl] = st.displayPose();
     %   m = st.metrics(10);            % stats over the last 10 s of locked data
+    %   [piv, tp, RdLock] = st.pointPose();   % point lock: pivot shift + target point [m], display frame
     %
     % Display frame = base IMU world frame turned about Z so that the base faced
     % +Y at the reference moment (the lock, or the first sample).
@@ -18,6 +19,7 @@ classdef TurretState < handle
         errAz = zeros(0, 1); errEl = zeros(0, 1)
         cmdAz = zeros(0, 1); measAz = zeros(0, 1); cmdEl = zeros(0, 1); measEl = zeros(0, 1)
         lockedBuf = zeros(0, 1); rateBuf = zeros(0, 1)
+        pivX = zeros(0, 1); pivY = zeros(0, 1); pivZ = zeros(0, 1); zuptBuf = zeros(0, 1)   % [cm]
         % latest state
         Locked logical = false
         Mode double = NaN
@@ -26,6 +28,12 @@ classdef TurretState < handle
         Rbrl double = eye(3)
         Az double = 0
         El double = 0
+        % point lock (firmware v2)
+        RangeM double = 0              % target distance [m] (0 = direction lock)
+        Piv double = [0; 0; 0]         % pivot displacement since lock [m], base-IMU world
+        TP double = [0; 0; 0]          % target point relative to the lock pivot [m], base-IMU world
+        HasPoint logical = false       % the log carries point-lock columns
+        RdLock double = eye(3)         % display attitude of the base at the lock
         % lock / view reference
         Rref double = eye(3)
         Yaw0 double = 0
@@ -70,6 +78,12 @@ classdef TurretState < handle
                 obj.Locked = lk;
                 br(i) = TurretMath.rotAngle(obj.Rref' * obj.Rbase);
             end
+            obj.HasPoint = has('piv_x') && has('tp_x') && has('range_m');
+            if obj.HasPoint
+                obj.RangeM = D(end, c.range_m);
+                obj.Piv = D(end, [c.piv_x c.piv_y c.piv_z])' / 100;
+                obj.TP = D(end, [c.tp_x c.tp_y c.tp_z])';
+            end
             if has('mode'), obj.Mode = D(end, c.mode); end
             if has('lead_ms'), obj.Lead = D(end, c.lead_ms); end
             get = @(f) TurretState.col(D, c, f);
@@ -85,10 +99,14 @@ classdef TurretState < handle
             obj.lockedBuf = [obj.lockedBuf; get('locked')];
             w = sqrt(get('bw_x').^2 + get('bw_y').^2 + get('bw_z').^2);
             obj.rateBuf = [obj.rateBuf; w];
+            obj.pivX = [obj.pivX; get('piv_x')];
+            obj.pivY = [obj.pivY; get('piv_y')];
+            obj.pivZ = [obj.pivZ; get('piv_z')];
+            obj.zuptBuf = [obj.zuptBuf; get('zupt')];
             keep = obj.t >= obj.t(end) - obj.WindowS;
             if ~all(keep)
                 f = {'t', 'baseRot', 'errTot', 'errAz', 'errEl', 'cmdAz', 'measAz', ...
-                     'cmdEl', 'measEl', 'lockedBuf', 'rateBuf'};
+                     'cmdEl', 'measEl', 'lockedBuf', 'rateBuf', 'pivX', 'pivY', 'pivZ', 'zuptBuf'};
                 for k = 1:numel(f), obj.(f{k}) = obj.(f{k})(keep); end
             end
         end
@@ -103,6 +121,19 @@ classdef TurretState < handle
             else
                 tgt = []; brl = [];
             end
+        end
+
+        function [piv, tp, RdLock] = pointPose(obj)
+            % Point lock in the display frame: pivot displacement since the lock and the
+            % target point relative to the lock pivot [m]. tp = [] for a direction lock.
+            Rv = TurretMath.rotz(-obj.Yaw0);
+            RdLock = obj.RdLock;
+            if ~obj.HasPoint || ~obj.Locked
+                piv = [0; 0; 0]; tp = [];             % unlocked: the estimate is not anchored to anything
+                return;
+            end
+            piv = Rv * obj.Piv;
+            if obj.RangeM > 0, tp = Rv * obj.TP; else, tp = []; end
         end
 
         function m = metrics(obj, windowS)
@@ -124,6 +155,7 @@ classdef TurretState < handle
             obj.Rref = obj.Rbase;
             obj.Yaw0 = TurretMath.heading(obj.Rbase);
             obj.HaveRef = true;
+            obj.RdLock = TurretMath.rotz(-obj.Yaw0) * obj.Rbase;
             if isLock
                 Rt = TurretMath.turretRot(obj.Az, obj.El);
                 obj.TargetW = obj.Rbase * Rt * [0; 1; 0];

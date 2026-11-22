@@ -1,0 +1,27 @@
+     0.302 >> stream on
+     0.302 >> info
+     0.303 >> stream on
+     0.354 >> m 3
+     0.405 >> lead 110
+     0.456 >> rtau 15
+     0.507 >> kp 0.3
+     0.558 >> ki 2
+     0.608 >> accel 4000
+     0.659 >> range 0
+     0.710 >> trans off
+     5.761 >> l
+     5.812 >> mark A_base
+    13.864 >> rtau 40
+    13.916 >> mark B_rtau40
+    21.968 >> rtau 15
+    22.018 >> lead 70
+    22.070 >> mark C_lead70
+    30.121 >> lead 110
+    30.173 >> kp 0.15
+    30.225 >> mark D_kp015
+    38.276 >> kp 0.3
+    38.326 >> accel 2000
+    38.377 >> mark E_acc2000
+    46.429 >> accel 4000
+    46.480 >> mark F_base
+    54.531 >> l

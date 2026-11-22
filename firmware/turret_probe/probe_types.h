@@ -16,6 +16,10 @@ struct ImuState {
   bool has_data = false;
   float qw = 1, qx = 0, qy = 0, qz = 0;
   uint8_t accuracy = 0;
+  float lax = 0, lay = 0, laz = 0;   // linear acceleration (gravity removed), sensor frame, m/s^2
+  uint8_t la_accuracy = 0;
+  uint32_t la_count = 0;             // linear-accel reports since last health line
+  uint32_t la_last_ms = 0;
   Mat3 R  = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};   // current body->world
   Mat3 R0 = {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};   // body->world at last tare
   uint32_t last_ms = 0;

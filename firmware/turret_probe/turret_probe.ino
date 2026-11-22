@@ -42,11 +42,22 @@
  *   imu <ms>             IMU report period in ms (e.g. 20 = 50 Hz, 5 = 200 Hz)
  *   mark <text>          drop an event marker into the log
  *   info                 print configuration
+ *   tofinit              (re)start the VL53L1X rangefinder
+ *   tofmode s|m|l        distance mode: short (1.3 m, best in daylight), medium (3 m), long (4 m)
+ *   tofbudget <ms>       timing budget per measurement (20..500 ms; longer = less noise)
+ *   tofroi <w> <h>       receiving area in SPADs (4..16): smaller = narrower beam (16 = ~27 deg)
+ *   tofcenter <spad>     move the receiving area (default 199 = middle) to tilt the beam
+ *
+ * Rangefinder: VL53L1X on the same I2C bus (0x29), mounted on the barrel.
+ * The base IMU also streams LINEAR ACCELERATION (gravity removed) for the
+ * translation estimate: la_* in the sensor frame and law_* in the base IMU's
+ * world frame (rotated with its game rotation vector).
  * ============================================================================
  */
 
 #include <Wire.h>
 #include <SCServo.h>
+#include <VL53L1X.h>
 #include "SparkFun_BNO080_Arduino_Library.h"
 #include "probe_types.h"
 
@@ -57,6 +68,7 @@ constexpr int I2C_SDA_PIN     = 6;
 constexpr int I2C_SCL_PIN     = 7;
 constexpr int MARK_BUTTON_PIN = 9;     // onboard BOOT button
 constexpr int IMU_RESET_PIN   = 2;     // shared RST (active LOW) of both BNO08x boards
+constexpr int TOF_XSHUT_PIN   = 3;     // VL53L1X XSHUT (active LOW). Harmless if not wired.
 
 constexpr uint32_t USB_BAUD = 921600;
 
@@ -231,7 +243,62 @@ void recoverI2CBus() {
 }
 
 void enableImuReports(ImuState &s) {
-  if (s.ready) s.dev.enableGameRotationVector(imu_period_ms);
+  if (!s.ready) return;
+  s.dev.enableGameRotationVector(imu_period_ms);
+  if (&s == &base_imu) s.dev.enableLinearAccelerometer(imu_period_ms);   // translation estimate
+}
+
+// ==================== TOF RANGEFINDER ====================
+VL53L1X tof;
+bool     tof_ready     = false;
+uint16_t tof_mm        = 0;
+uint8_t  tof_status    = 255;     // VL53L1X::RangeStatus, 0 = valid
+float    tof_signal    = 0;       // peak signal rate, MCPS
+float    tof_ambient   = 0;       // ambient light rate, MCPS
+uint32_t tof_last_ms   = 0;
+uint32_t tof_count     = 0;       // measurements since last health line
+char     tof_mode      = 'l';
+uint16_t tof_budget_ms = 33;
+uint8_t  tof_roi_w = 16, tof_roi_h = 16, tof_roi_center = 199;
+
+void configureTof() {
+  tof.stopContinuous();
+  bool ok = tof.setDistanceMode(tof_mode == 's' ? VL53L1X::Short : tof_mode == 'm' ? VL53L1X::Medium : VL53L1X::Long);
+  ok &= tof.setMeasurementTimingBudget((uint32_t)tof_budget_ms * 1000);
+  tof.setROISize(tof_roi_w, tof_roi_h);
+  tof.setROICenter(tof_roi_center);
+  tof.startContinuous(tof_budget_ms);   // inter-measurement period = budget: back-to-back ranging
+  Serial.printf("# ToF config: mode=%c budget=%u ms roi=%ux%u center=%u %s\n",
+                tof_mode, tof_budget_ms, tof_roi_w, tof_roi_h, tof_roi_center, ok ? "" : "(mode/budget REJECTED)");
+}
+
+void initTof() {
+  pinMode(TOF_XSHUT_PIN, OUTPUT);
+  digitalWrite(TOF_XSHUT_PIN, LOW);     // hardware reset (no effect if XSHUT is not wired)
+  delay(5);
+  digitalWrite(TOF_XSHUT_PIN, HIGH);
+  delay(5);
+  tof.setBus(&Wire);
+  tof.setTimeout(50);
+  tof_ready = tof.init();
+  Serial.printf("# ToF VL53L1X (0x29): %s\n", tof_ready ? "OK" : "FAIL (check wiring / scan)");
+  if (tof_ready) configureTof();
+  tof_last_ms = millis();
+}
+
+// Non-blocking: check the data-ready flag at most every 5 ms so the IMUs keep the bus.
+void pollTof(uint32_t now) {
+  static uint32_t last_check_ms = 0;
+  if (!tof_ready || now - last_check_ms < 5) return;
+  last_check_ms = now;
+  if (!tof.dataReady()) return;
+  tof.read(false);
+  tof_mm      = tof.ranging_data.range_mm;
+  tof_status  = tof.ranging_data.range_status;
+  tof_signal  = tof.ranging_data.peak_signal_count_rate_MCPS;
+  tof_ambient = tof.ranging_data.ambient_count_rate_MCPS;
+  tof_last_ms = now;
+  tof_count++;
 }
 
 // List every address that ACKs on the bus (BNO08x should appear at 0x4A / 0x4B).
@@ -308,6 +375,13 @@ void pollImu(ImuState &s) {
       s.last_ms = millis();
       s.count++;
       s.has_data = true;
+    } else if (id == SENSOR_REPORTID_LINEAR_ACCELERATION) {
+      s.lax = s.dev.getLinAccelX();
+      s.lay = s.dev.getLinAccelY();
+      s.laz = s.dev.getLinAccelZ();
+      s.la_accuracy = s.dev.getLinAccelAccuracy();
+      s.la_last_ms = millis();
+      s.la_count++;
     }
   }
 }
@@ -340,7 +414,9 @@ void printHeader() {
                  "cmd_az,cmd_el,meas_az,meas_el,"
                  "cmd_az_tick,cmd_el_tick,meas_az_tick,meas_el_tick,"
                  "az_speed,el_speed,az_load,el_load,"
-                 "base_age_ms,brl_age_ms");
+                 "base_age_ms,brl_age_ms,"
+                 "tof_mm,tof_status,tof_sig,tof_amb,tof_age_ms,"
+                 "la_x,la_y,la_z,la_acc,law_x,law_y,law_z,la_age_ms");
 }
 
 void printData(uint32_t now) {
@@ -351,7 +427,12 @@ void printData(uint32_t now) {
     Mat3 Rj = matMul(matMul(matT(base_imu.R), joint_offset), barrel_imu.R);
     matToAzEl(Rj, jaz, jel);
   }
-  char buf[400];
+  // linear acceleration rotated into the base IMU's world frame (+Z up)
+  const Mat3 &Rb = base_imu.R;
+  float lwx = Rb.m[0][0] * base_imu.lax + Rb.m[0][1] * base_imu.lay + Rb.m[0][2] * base_imu.laz;
+  float lwy = Rb.m[1][0] * base_imu.lax + Rb.m[1][1] * base_imu.lay + Rb.m[1][2] * base_imu.laz;
+  float lwz = Rb.m[2][0] * base_imu.lax + Rb.m[2][1] * base_imu.lay + Rb.m[2][2] * base_imu.laz;
+  char buf[600];
   int n = snprintf(buf, sizeof(buf), "D,%lu,%lu,"
                 "%.5f,%.5f,%.5f,%.5f,%u,"
                 "%.5f,%.5f,%.5f,%.5f,%u,"
@@ -361,7 +442,9 @@ void printData(uint32_t now) {
                 "%.2f,%.2f,%.2f,%.2f,"
                 "%d,%d,%d,%d,"
                 "%d,%d,%d,%d,"
-                "%lu,%lu\n",
+                "%lu,%lu,"
+                "%u,%u,%.3f,%.3f,%lu,"
+                "%.4f,%.4f,%.4f,%u,%.4f,%.4f,%.4f,%lu\n",
                 now, seq++,
                 base_imu.qw, base_imu.qx, base_imu.qy, base_imu.qz, base_imu.accuracy,
                 barrel_imu.qw, barrel_imu.qx, barrel_imu.qy, barrel_imu.qz, barrel_imu.accuracy,
@@ -371,7 +454,10 @@ void printData(uint32_t now) {
                 az_servo.cmd_deg, el_servo.cmd_deg, servoActualDeg(az_servo), servoActualDeg(el_servo),
                 az_servo.cmd_tick, el_servo.cmd_tick, az_servo.meas_tick, el_servo.meas_tick,
                 az_servo.meas_speed, el_servo.meas_speed, az_servo.meas_load, el_servo.meas_load,
-                now - base_imu.last_ms, now - barrel_imu.last_ms);
+                now - base_imu.last_ms, now - barrel_imu.last_ms,
+                tof_mm, tof_status, tof_signal, tof_ambient, now - tof_last_ms,
+                base_imu.lax, base_imu.lay, base_imu.laz, base_imu.la_accuracy, lwx, lwy, lwz,
+                now - base_imu.la_last_ms);
   // Send the whole line or nothing: a truncated CSV row is worse than a missing one.
   if (n > 0 && n < (int)sizeof(buf) && Serial.availableForWrite() >= n) Serial.write((const uint8_t *)buf, n);
   else lines_dropped++;
@@ -381,11 +467,13 @@ void printHealth(uint32_t now, uint32_t window_ms) {
   float scale = 1000.0f / window_ms;
   uint32_t ok = az_servo.reads_ok + el_servo.reads_ok;
   uint32_t total = ok + az_servo.reads_fail + el_servo.reads_fail;
-  Serial.printf("S,%lu,base_hz=%.1f,brl_hz=%.1f,servo_ok=%lu/%lu,loop_max_us=%lu,i2c_khz=%lu,imu_ms=%u,imu_resets=%lu/%lu,recoveries=%lu,dropped=%lu\n",
-                now, base_imu.count * scale, barrel_imu.count * scale, ok, total,
+  Serial.printf("S,%lu,base_hz=%.1f,brl_hz=%.1f,la_hz=%.1f,tof_hz=%.1f,servo_ok=%lu/%lu,loop_max_us=%lu,i2c_khz=%lu,imu_ms=%u,imu_resets=%lu/%lu,recoveries=%lu,dropped=%lu\n",
+                now, base_imu.count * scale, barrel_imu.count * scale, base_imu.la_count * scale, tof_count * scale, ok, total,
                 loop_max_us, i2c_khz, imu_period_ms, base_imu.resets, barrel_imu.resets, imu_recoveries, lines_dropped);
   lines_dropped = 0;
   base_imu.count = barrel_imu.count = 0;
+  base_imu.la_count = 0;
+  tof_count = 0;
   az_servo.reads_ok = az_servo.reads_fail = el_servo.reads_ok = el_servo.reads_fail = 0;
   loop_max_us = 0;
 }
@@ -398,12 +486,15 @@ void printInfo() {
                 el_servo.id, el_servo.zero_tick, el_servo.dir, el_servo.min_deg, el_servo.max_deg, el_servo.deg_per_tick);
   Serial.printf("# IMUs: base %s, barrel %s | tared=%s\n",
                 base_imu.ready ? "OK" : "FAIL", barrel_imu.ready ? "OK" : "FAIL", tared ? "yes" : "no");
+  Serial.printf("# ToF: %s mode=%c budget=%u ms roi=%ux%u center=%u\n", tof_ready ? "OK" : "FAIL",
+                tof_mode, tof_budget_ms, tof_roi_w, tof_roi_h, tof_roi_center);
 }
 
 void printHelp() {
   Serial.println("# Commands: help | stream on|off | rate <hz> | z | c | az <deg> | el <deg> | go <az> <el>");
   Serial.println("#           taz <tick> | tel <tick> | spd <n> | on | off | i2c <khz> | imu <ms> | mark <text> | info");
   Serial.println("#           scan (list I2C devices) | imuinit (recover bus + retry both IMUs)");
+  Serial.println("#           tofinit | tofmode s|m|l | tofbudget <ms> | tofroi <w> <h> | tofcenter <spad>");
 }
 
 // ==================== COMMANDS (non-blocking line reader) ====================
@@ -472,6 +563,30 @@ void handleCommand(String line) {
     Wire.setTimeOut(100);
   }
   else if (line == "imuinit") { initImus(); scanI2C(); }
+  else if (line == "tofinit") initTof();
+  else if (line.startsWith("tofmode ")) {
+    char m = line.charAt(8);
+    if (m == 's' || m == 'm' || m == 'l') { tof_mode = m; if (tof_ready) configureTof(); }
+    else Serial.println("# usage: tofmode s|m|l");
+  }
+  else if (line.startsWith("tofbudget ")) {
+    tof_budget_ms = constrain(line.substring(10).toInt(), 20, 500);
+    if (tof_ready) configureTof();
+  }
+  else if (line.startsWith("tofroi ")) {
+    String rest = line.substring(7);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    int w = rest.substring(0, sp < 0 ? rest.length() : sp).toInt();
+    int h = sp < 0 ? w : rest.substring(sp + 1).toInt();
+    tof_roi_w = constrain(w, 4, 16);
+    tof_roi_h = constrain(h, 4, 16);
+    if (tof_ready) configureTof();
+  }
+  else if (line.startsWith("tofcenter ")) {
+    tof_roi_center = constrain(line.substring(10).toInt(), 0, 255);
+    if (tof_ready) configureTof();
+  }
   else if (line.startsWith("mark")) { Serial.printf("E,%lu,mark,%s\n", millis(), line.substring(4).c_str()); }
   else { Serial.printf("# unknown command '%s'\n", line.c_str()); printHelp(); }
 }
@@ -512,6 +627,7 @@ void setup() {
   writeServoDeg(el_servo, 0);
 
   initImus();
+  initTof();
   scanI2C();
 
   printInfo();
@@ -537,6 +653,7 @@ void loop() {
   pollImu(base_imu);
   pollImu(barrel_imu);
   imuWatchdog(millis());
+  pollTof(millis());
 
   uint32_t now = millis();
   static uint32_t last_stream_ms = 0;
