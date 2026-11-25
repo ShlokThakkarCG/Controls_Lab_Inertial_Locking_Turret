@@ -1,8 +1,8 @@
 # ENR 312: 2-axis inertially stabilized turret
 
-watch here -> [YouTube](https://youtu.be/zV6PJhuFrNA)
+[YouTube Video Link](https://youtu.be/zV6PJhuFrNA)
 
-more vids -> [GoogleDrive](https://drive.google.com/drive/folders/1tQs0ntFzKtMpE5NhNUlBaBvzWU9CKt9a?usp=sharing)
+[Google Drive Link for more vids](https://drive.google.com/drive/folders/1tQs0ntFzKtMpE5NhNUlBaBvzWU9CKt9a?usp=sharing)
 
 ESP32-C6-DevKitC-1 · 2× Feetech SC15 bus servos (Waveshare adapter, 1 Mbps) · 2× BNO08x IMUs (Game Rotation Vector)
 
