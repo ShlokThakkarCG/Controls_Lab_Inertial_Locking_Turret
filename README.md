@@ -1,5 +1,8 @@
 # ENR 312: 2-axis inertially stabilized turret
 
+watch here -> 
+more vids -> [https://drive.google.com/drive/folders/1tQs0ntFzKtMpE5NhNUlBaBvzWU9CKt9a?usp=sharing](url)
+
 ESP32-C6-DevKitC-1 · 2× Feetech SC15 bus servos (Waveshare adapter, 1 Mbps) · 2× BNO08x IMUs (Game Rotation Vector)
 
 Goal: hold the barrel's **pointing direction** fixed in space while the base plate is moved by hand in roll, pitch and yaw.
